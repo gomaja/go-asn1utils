@@ -112,7 +112,7 @@ func parseElement(data []byte, pos int) (ASN1Object, int, error) {
 		}
 		// Parse sub-elements until EOC (0x00 0x00)
 		for {
-			if pos+1 <= len(data) && data[pos] == 0x00 && data[pos+1] == 0x00 {
+			if pos+2 <= len(data) && data[pos] == 0x00 && data[pos+1] == 0x00 {
 				// End-of-Contents marker
 				pos += 2
 				break
