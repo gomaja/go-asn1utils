@@ -3,6 +3,7 @@
 [![Go CI](https://github.com/gomaja/go-asn1utils/actions/workflows/ci.yml/badge.svg)](https://github.com/gomaja/go-asn1utils/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/gomaja/go-asn1utils.svg)](https://pkg.go.dev/github.com/gomaja/go-asn1utils)
 [![Go Report Card](https://goreportcard.com/badge/github.com/gomaja/go-asn1utils)](https://goreportcard.com/report/github.com/gomaja/go-asn1utils)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/gomaja/go-asn1utils)](https://github.com/gomaja/go-asn1utils/blob/main/go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=gomaja_go-asn1utils&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=gomaja_go-asn1utils)
