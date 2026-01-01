@@ -141,7 +141,7 @@ func parseLength(data []byte, pos int) (int, int, error) {
 }
 
 func parseIndefiniteContent(data []byte, pos int, isConstructed bool, tagClass, tagNumber int) ([]byte, []ASN1Object, int, error) {
-	// Indefinite length: must be constructed (per BER rules):contentReference[oaicite:9]{index=9}.
+	// Indefinite length: must be constructed (per BER rules).
 	if !isConstructed {
 		return nil, nil, pos, fmt.Errorf("indefinite length used for a primitive tag (tag class %d, number %d)", tagClass, tagNumber)
 	}
