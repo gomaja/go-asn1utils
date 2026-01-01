@@ -184,12 +184,11 @@ func parseDefiniteContent(data []byte, pos int, length int, isConstructed bool) 
 			return nil, nil, pos, fmt.Errorf("length mismatch for constructed tag (expected end at %d, got %d)", endPos, pos)
 		}
 		return nil, subObjects, pos, nil
-	} else {
-		// Primitive: take the value bytes
-		val := data[pos : pos+length]
-		pos += length
-		return val, nil, pos, nil
 	}
+	// Primitive: take the value bytes
+	val := data[pos : pos+length]
+	pos += length
+	return val, nil, pos, nil
 }
 
 // encodeDER encodes an ASN1Object (with all substructure parsed) into DER-compliant bytes.
