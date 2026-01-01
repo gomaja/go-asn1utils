@@ -39,7 +39,43 @@ func parseElement(data []byte, pos int) (ASN1Object, int, error) {
 	if pos >= len(data) {
 		return ASN1Object{}, pos, fmt.Errorf("unexpected end of data")
 	}
-	// --- Parse Tag ---
+
+	tagClass, tagNumber, isConstructed, pos, err := parseTag(data, pos)
+	if err != nil {
+		return ASN1Object{}, pos, err
+	}
+
+	length, pos, err := parseLength(data, pos)
+	if err != nil {
+		return ASN1Object{}, pos, err
+	}
+
+	var val []byte
+	var subObjects []ASN1Object
+
+	if length == -1 {
+		val, subObjects, pos, err = parseIndefiniteContent(data, pos, isConstructed, tagClass, tagNumber)
+	} else {
+		val, subObjects, pos, err = parseDefiniteContent(data, pos, length, isConstructed)
+	}
+
+	if err != nil {
+		return ASN1Object{}, pos, err
+	}
+
+	return ASN1Object{
+		Class:         tagClass,
+		TagNumber:     tagNumber,
+		IsConstructed: isConstructed,
+		Value:         val,
+		SubObjects:    subObjects,
+	}, pos, nil
+}
+
+func parseTag(data []byte, pos int) (int, int, bool, int, error) {
+	if pos >= len(data) {
+		return 0, 0, false, pos, fmt.Errorf("unexpected end of data")
+	}
 	firstByte := data[pos]
 	pos++
 	// Determine class and constructed flag from first byte
@@ -52,7 +88,7 @@ func parseElement(data []byte, pos int) (ASN1Object, int, error) {
 		var octetCount int
 		for {
 			if pos >= len(data) {
-				return ASN1Object{}, pos, fmt.Errorf("truncated tag bytes")
+				return 0, 0, false, pos, fmt.Errorf("truncated tag bytes")
 			}
 			octet := data[pos]
 			pos++
@@ -66,19 +102,16 @@ func parseElement(data []byte, pos int) (ASN1Object, int, error) {
 			// Safety check: ASN.1 tag bytes are limited (to avoid overflow)
 			if octetCount > 6 {
 				// (6 bytes => 42 bits for tag number, which is extremely large; adjust as needed)
-				return ASN1Object{}, pos, fmt.Errorf("tag number is too large")
+				return 0, 0, false, pos, fmt.Errorf("tag number is too large")
 			}
 		}
 	}
-	// Create object shell
-	obj := ASN1Object{
-		Class:         tagClass,
-		TagNumber:     tagNumber,
-		IsConstructed: isConstructed,
-	}
-	// --- Parse Length ---
+	return tagClass, tagNumber, isConstructed, pos, nil
+}
+
+func parseLength(data []byte, pos int) (int, int, error) {
 	if pos >= len(data) {
-		return ASN1Object{}, pos, fmt.Errorf("unexpected end of data after tag")
+		return 0, pos, fmt.Errorf("unexpected end of data after tag")
 	}
 	lengthByte := data[pos]
 	pos++
@@ -94,7 +127,7 @@ func parseElement(data []byte, pos int) (ASN1Object, int, error) {
 			length = -1
 		} else {
 			if pos+numLenBytes > len(data) {
-				return ASN1Object{}, pos, fmt.Errorf("length bytes exceed data size")
+				return 0, pos, fmt.Errorf("length bytes exceed data size")
 			}
 			// Decode big-endian length
 			length = 0
@@ -104,53 +137,59 @@ func parseElement(data []byte, pos int) (ASN1Object, int, error) {
 			pos += numLenBytes
 		}
 	}
-	// --- Parse Value / SubObjects ---
-	if length == -1 {
-		// Indefinite length: must be constructed (per BER rules):contentReference[oaicite:9]{index=9}.
-		if !isConstructed {
-			return ASN1Object{}, pos, fmt.Errorf("indefinite length used for a primitive tag (tag class %d, number %d)", tagClass, tagNumber)
+	return length, pos, nil
+}
+
+func parseIndefiniteContent(data []byte, pos int, isConstructed bool, tagClass, tagNumber int) ([]byte, []ASN1Object, int, error) {
+	// Indefinite length: must be constructed (per BER rules):contentReference[oaicite:9]{index=9}.
+	if !isConstructed {
+		return nil, nil, pos, fmt.Errorf("indefinite length used for a primitive tag (tag class %d, number %d)", tagClass, tagNumber)
+	}
+	// Parse sub-elements until EOC (0x00 0x00)
+	var subObjects []ASN1Object
+	for {
+		if pos+2 <= len(data) && data[pos] == 0x00 && data[pos+1] == 0x00 {
+			// End-of-Contents marker
+			pos += 2
+			break
 		}
-		// Parse sub-elements until EOC (0x00 0x00)
-		for {
-			if pos+2 <= len(data) && data[pos] == 0x00 && data[pos+1] == 0x00 {
-				// End-of-Contents marker
-				pos += 2
-				break
-			}
+		subObj, newPos, err := parseElement(data, pos)
+		if err != nil {
+			return nil, nil, pos, err
+		}
+		subObjects = append(subObjects, subObj)
+		pos = newPos
+	}
+	return nil, subObjects, pos, nil
+}
+
+func parseDefiniteContent(data []byte, pos int, length int, isConstructed bool) ([]byte, []ASN1Object, int, error) {
+	if pos+length > len(data) {
+		return nil, nil, pos, fmt.Errorf("specified length %d exceeds remaining data", length)
+	}
+	if isConstructed {
+		// Parse `length` bytes as sub-elements
+		var subObjects []ASN1Object
+		endPos := pos + length
+		for pos < endPos {
 			subObj, newPos, err := parseElement(data, pos)
 			if err != nil {
-				return ASN1Object{}, pos, err
+				return nil, nil, pos, err
 			}
-			obj.SubObjects = append(obj.SubObjects, subObj)
+			subObjects = append(subObjects, subObj)
 			pos = newPos
 		}
+		// Sanity: pos should now equal endPos
+		if pos != endPos {
+			return nil, nil, pos, fmt.Errorf("length mismatch for constructed tag (expected end at %d, got %d)", endPos, pos)
+		}
+		return nil, subObjects, pos, nil
 	} else {
-		// Definite length
-		if pos+length > len(data) {
-			return ASN1Object{}, pos, fmt.Errorf("specified length %d exceeds remaining data", length)
-		}
-		if isConstructed {
-			// Parse `length` bytes as sub-elements
-			endPos := pos + length
-			for pos < endPos {
-				subObj, newPos, err := parseElement(data, pos)
-				if err != nil {
-					return ASN1Object{}, pos, err
-				}
-				obj.SubObjects = append(obj.SubObjects, subObj)
-				pos = newPos
-			}
-			// Sanity: pos should now equal endPos
-			if pos != endPos {
-				return ASN1Object{}, pos, fmt.Errorf("length mismatch for constructed tag (expected end at %d, got %d)", endPos, pos)
-			}
-		} else {
-			// Primitive: take the value bytes
-			obj.Value = data[pos : pos+length]
-			pos += length
-		}
+		// Primitive: take the value bytes
+		val := data[pos : pos+length]
+		pos += length
+		return val, nil, pos, nil
 	}
-	return obj, pos, nil
 }
 
 // encodeDER encodes an ASN1Object (with all substructure parsed) into DER-compliant bytes.
