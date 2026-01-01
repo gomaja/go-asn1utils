@@ -194,126 +194,171 @@ func parseDefiniteContent(data []byte, pos int, length int, isConstructed bool) 
 // encodeDER encodes an ASN1Object (with all substructure parsed) into DER-compliant bytes.
 func encodeDER(obj ASN1Object) ([]byte, error) {
 	// If the object is constructed, first handle any special DER rules for constructed types
-	if obj.IsConstructed {
-		// **DER Flattening**: If this is a constructed form of a normally primitive type (e.g. Octet String, Bit String, or other strings),
-		// we need to flatten it into a primitive encoding.
-		if obj.Class == 0 { // universal class
-			switch obj.TagNumber {
-			case 3: // BIT STRING
-				// All subobjects should be primitive bit string fragments
-				var bitData []byte
-				var finalUnusedBits byte = 0
-				for i, sub := range obj.SubObjects {
-					if !(sub.Class == 0 && sub.TagNumber == 3 && !sub.IsConstructed) {
-						return nil, fmt.Errorf("BIT STRING constructed with invalid sub-element at index %d", i)
-					}
-					if len(sub.Value) == 0 {
-						return nil, fmt.Errorf("BIT STRING sub-element %d has no content", i)
-					}
-					// The first byte of each BIT STRING content is the 'unused bits' count
-					unused := sub.Value[0]
-					dataBytes := sub.Value[1:]
-					if i < len(obj.SubObjects)-1 {
-						// Not the last chunk
-						if unused != 0 {
-							return nil, fmt.Errorf("intermediate BIT STRING chunk %d has non-zero unused bits (%d)", i, unused)
-						}
-						// Append all bits (full bytes) from this chunk
-						bitData = append(bitData, dataBytes...)
-					} else {
-						// Last chunk: record its unused bits and append its data
-						finalUnusedBits = unused
-						bitData = append(bitData, dataBytes...)
-					}
-				}
-				// Construct the flattened BIT STRING content: one byte for final unused bits count + concatenated data
-				obj.IsConstructed = false
-				obj.Value = append([]byte{finalUnusedBits}, bitData...)
-				obj.SubObjects = nil // clear subobjects since now primitive
-			case 4: // OCTET STRING
-				var octets []byte
-				for i, sub := range obj.SubObjects {
-					if !(sub.Class == 0 && sub.TagNumber == 4 && !sub.IsConstructed) {
-						return nil, fmt.Errorf("OCTET STRING constructed with invalid sub-element at index %d", i)
-					}
-					octets = append(octets, sub.Value...)
-				}
-				obj.IsConstructed = false
-				obj.Value = octets
-				obj.SubObjects = nil
-			case 12, 18, 19, 20, 21, 22, 25, 26, 27, 28, 30:
-				// Various string types: UTF8String(12), NumericString(18), PrintableString(19), TeletexString(20),
-				// VideotexString(21), IA5String(22), GraphicString(25), VisibleString(26), GeneralString(27),
-				// UniversalString(28), BMPString(30) – flatten similarly
-				var strContent []byte
-				for i, sub := range obj.SubObjects {
-					if !(sub.Class == 0 && sub.TagNumber == obj.TagNumber && !sub.IsConstructed) {
-						return nil, fmt.Errorf("constructed string (tag %d) has invalid sub-element at index %d", obj.TagNumber, i)
-					}
-					strContent = append(strContent, sub.Value...)
-				}
-				obj.IsConstructed = false
-				obj.Value = strContent
-				obj.SubObjects = nil
-			case 17:
-				// SET (or SET OF) – inherently constructed, do not flatten, but will sort below
-				// (Handled in sorting section)
-			default:
-				// No special handling for other constructed universal types (e.g., SEQUENCE is fine as is)
-			}
+	if obj.IsConstructed && obj.Class == 0 {
+		if err := flattenConstructedType(&obj); err != nil {
+			return nil, err
 		}
 	}
 
-	var contentBytes []byte
+	contentBytes, err := encodeContent(obj)
+	if err != nil {
+		return nil, err
+	}
 
-	if obj.IsConstructed {
-		// Handle constructed content encoding (e.g., Sequence, Set, or context/application containers)
-		// If SET OF/SET, sort the sub-encodings for DER:contentReference[oaicite:10]{index=10}:
-		if obj.Class == 0 && obj.TagNumber == 17 {
-			// Encode each subobject to DER and sort them lexicographically
-			encodedSubs := make([][]byte, len(obj.SubObjects))
-			for i, sub := range obj.SubObjects {
-				subEnc, err := encodeDER(sub)
-				if err != nil {
-					return nil, err
-				}
-				encodedSubs[i] = subEnc
+	tagBytes := encodeTag(obj)
+	lengthBytes := encodeLength(len(contentBytes))
+
+	// Combine tag, length, and content
+	encoded := make([]byte, 0, len(tagBytes)+len(lengthBytes)+len(contentBytes))
+	encoded = append(encoded, tagBytes...)
+	encoded = append(encoded, lengthBytes...)
+	encoded = append(encoded, contentBytes...)
+	return encoded, nil
+}
+
+func flattenConstructedType(obj *ASN1Object) error {
+	switch obj.TagNumber {
+	case 3: // BIT STRING
+		return flattenBitString(obj)
+	case 4: // OCTET STRING
+		return flattenOctetString(obj)
+	case 12, 18, 19, 20, 21, 22, 25, 26, 27, 28, 30:
+		// Various string types
+		return flattenString(obj)
+	case 17:
+		// SET (or SET OF) – inherently constructed, do not flatten
+		return nil
+	default:
+		return nil
+	}
+}
+
+func flattenBitString(obj *ASN1Object) error {
+	// All subobjects should be primitive bit string fragments
+	var bitData []byte
+	var finalUnusedBits byte = 0
+	for i, sub := range obj.SubObjects {
+		if !(sub.Class == 0 && sub.TagNumber == 3 && !sub.IsConstructed) {
+			return fmt.Errorf("BIT STRING constructed with invalid sub-element at index %d", i)
+		}
+		if len(sub.Value) == 0 {
+			return fmt.Errorf("BIT STRING sub-element %d has no content", i)
+		}
+		// The first byte of each BIT STRING content is the 'unused bits' count
+		unused := sub.Value[0]
+		dataBytes := sub.Value[1:]
+		if i < len(obj.SubObjects)-1 {
+			// Not the last chunk
+			if unused != 0 {
+				return fmt.Errorf("intermediate BIT STRING chunk %d has non-zero unused bits (%d)", i, unused)
 			}
-			sort.Slice(encodedSubs, func(i, j int) bool {
-				return bytes.Compare(encodedSubs[i], encodedSubs[j]) < 0
-			})
-			// Concatenate sorted encodings
-			for _, enc := range encodedSubs {
-				contentBytes = append(contentBytes, enc...)
-			}
+			// Append all bits (full bytes) from this chunk
+			bitData = append(bitData, dataBytes...)
 		} else {
-			// Not a SET, just encode subobjects in given order
-			for _, sub := range obj.SubObjects {
-				subEnc, err := encodeDER(sub)
-				if err != nil {
-					return nil, err
-				}
-				contentBytes = append(contentBytes, subEnc...)
-			}
+			// Last chunk: record its unused bits and append its data
+			finalUnusedBits = unused
+			bitData = append(bitData, dataBytes...)
 		}
-	} else {
-		// Primitive content
-		contentBytes = obj.Value
-		// **Boolean normalization**: If this is a boolean, ensure value is 0x00 or 0xFF:contentReference[oaicite:11]{index=11}.
-		// Universal BOOLEAN (tag 1) or context-specific boolean (commonly tag 1 in context).
-		if len(contentBytes) == 1 {
-			if (obj.Class == 0 && obj.TagNumber == 1) || (obj.Class == 2 && obj.TagNumber == 1) {
-				// Normalize TRUE to 0xFF, FALSE is 0x00
-				if contentBytes[0] != 0x00 {
-					contentBytes = []byte{0xFF}
-				} else {
-					contentBytes = []byte{0x00}
-				}
+	}
+	// Construct the flattened BIT STRING content: one byte for final unused bits count + concatenated data
+	obj.IsConstructed = false
+	obj.Value = append([]byte{finalUnusedBits}, bitData...)
+	obj.SubObjects = nil // clear subobjects since now primitive
+	return nil
+}
+
+func flattenOctetString(obj *ASN1Object) error {
+	var octets []byte
+	for i, sub := range obj.SubObjects {
+		if !(sub.Class == 0 && sub.TagNumber == 4 && !sub.IsConstructed) {
+			return fmt.Errorf("OCTET STRING constructed with invalid sub-element at index %d", i)
+		}
+		octets = append(octets, sub.Value...)
+	}
+	obj.IsConstructed = false
+	obj.Value = octets
+	obj.SubObjects = nil
+	return nil
+}
+
+func flattenString(obj *ASN1Object) error {
+	var strContent []byte
+	for i, sub := range obj.SubObjects {
+		if !(sub.Class == 0 && sub.TagNumber == obj.TagNumber && !sub.IsConstructed) {
+			return fmt.Errorf("constructed string (tag %d) has invalid sub-element at index %d", obj.TagNumber, i)
+		}
+		strContent = append(strContent, sub.Value...)
+	}
+	obj.IsConstructed = false
+	obj.Value = strContent
+	obj.SubObjects = nil
+	return nil
+}
+
+func encodeContent(obj ASN1Object) ([]byte, error) {
+	if obj.IsConstructed {
+		return encodeConstructedContent(obj)
+	}
+	return encodePrimitiveContent(obj), nil
+}
+
+func encodeConstructedContent(obj ASN1Object) ([]byte, error) {
+	// Handle constructed content encoding (e.g., Sequence, Set, or context/application containers)
+	// If SET OF/SET, sort the sub-encodings for DER
+	if obj.Class == 0 && obj.TagNumber == 17 {
+		return encodeSetContent(obj)
+	}
+	// Not a SET, just encode subobjects in given order
+	var contentBytes []byte
+	for _, sub := range obj.SubObjects {
+		subEnc, err := encodeDER(sub)
+		if err != nil {
+			return nil, err
+		}
+		contentBytes = append(contentBytes, subEnc...)
+	}
+	return contentBytes, nil
+}
+
+func encodePrimitiveContent(obj ASN1Object) []byte {
+	// Primitive content
+	contentBytes := obj.Value
+	// **Boolean normalization**: If this is a boolean, ensure value is 0x00 or 0xFF
+	if len(contentBytes) == 1 {
+		if (obj.Class == 0 && obj.TagNumber == 1) || (obj.Class == 2 && obj.TagNumber == 1) {
+			// Normalize TRUE to 0xFF, FALSE is 0x00
+			if contentBytes[0] != 0x00 {
+				contentBytes = []byte{0xFF}
+			} else {
+				contentBytes = []byte{0x00}
 			}
 		}
 	}
+	return contentBytes
+}
 
-	// --- Encode Tag ---
+func encodeSetContent(obj ASN1Object) ([]byte, error) {
+	// Encode each subobject to DER and sort them lexicographically
+	encodedSubs := make([][]byte, len(obj.SubObjects))
+	for i, sub := range obj.SubObjects {
+		subEnc, err := encodeDER(sub)
+		if err != nil {
+			return nil, err
+		}
+		encodedSubs[i] = subEnc
+	}
+	sort.Slice(encodedSubs, func(i, j int) bool {
+		return bytes.Compare(encodedSubs[i], encodedSubs[j]) < 0
+	})
+	// Concatenate sorted encodings
+	var contentBytes []byte
+	for _, enc := range encodedSubs {
+		contentBytes = append(contentBytes, enc...)
+	}
+	return contentBytes, nil
+}
+
+func encodeTag(obj ASN1Object) []byte {
 	var tagBytes []byte
 	// Construct the first identifier octet from class and constructed flag
 	firstOctet := byte((obj.Class & 0x3) << 6)
@@ -346,9 +391,10 @@ func encodeDER(obj ASN1Object) ([]byte, error) {
 		// Append the tag number bytes
 		tagBytes = append(tagBytes, tmp...)
 	}
+	return tagBytes
+}
 
-	// --- Encode Length ---
-	length := len(contentBytes)
+func encodeLength(length int) []byte {
 	var lengthBytes []byte
 	if length < 128 {
 		lengthBytes = []byte{byte(length)}
@@ -365,11 +411,5 @@ func encodeDER(obj ASN1Object) ([]byte, error) {
 		numLenBytes := len(lenOctets)
 		lengthBytes = append([]byte{0x80 | byte(numLenBytes)}, lenOctets...)
 	}
-
-	// Combine tag, length, and content
-	encoded := make([]byte, 0, len(tagBytes)+len(lengthBytes)+len(contentBytes))
-	encoded = append(encoded, tagBytes...)
-	encoded = append(encoded, lengthBytes...)
-	encoded = append(encoded, contentBytes...)
-	return encoded, nil
+	return lengthBytes
 }
